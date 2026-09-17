@@ -628,7 +628,6 @@ struct CameraPage {
             .padding({ left: 12, right: 12, bottom: 6 })
           }, (p: PhotoItem) => 'w' + p.uri + p.name + p.isWaste)
         }
-        .enableEditMode(true)
         .onItemMove((from: number, to: number): boolean => {
           this.onMove(from, to);
           return true;

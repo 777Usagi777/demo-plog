@@ -5,13 +5,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "C:\\Users\\l00981356\\.ohos\\config\\default_gewu-demo_ogg1CKeehdvZ7TUoiPxwWfyqFZmm6mCo239sLDmCHAU=.cer",
+          "certpath": "C:\\Users\\40372\\.ohos\\config\\default_demo-plog_GrsMcWBBxyQUg5cFtnXOSSRDU8PrvqiVqbFO0e0Nphk=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B6DFF90E052D3253C4EC9A486C57FA1A3B12DF74B18E5747F3BBB2686E55AD78B5BFE41EE6B9903",
-          "profile": "C:\\Users\\l00981356\\.ohos\\config\\default_gewu-demo_ogg1CKeehdvZ7TUoiPxwWfyqFZmm6mCo239sLDmCHAU=.p7b",
+          "keyPassword": "0000001A44CD1A3AE1E7A751AAEF240C57064AF9B421622DCD347986230A8FACC9542CAF340623DAD7C1",
+          "profile": "C:\\Users\\40372\\.ohos\\config\\default_demo-plog_GrsMcWBBxyQUg5cFtnXOSSRDU8PrvqiVqbFO0e0Nphk=.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\l00981356\\.ohos\\config\\default_gewu-demo_ogg1CKeehdvZ7TUoiPxwWfyqFZmm6mCo239sLDmCHAU=.p12",
-          "storePassword": "0000001BB64D831060D0710D221602DBFA58144AEB2045F2144A36845227316DBDD760F3BEBCA1ED714BF3"
+          "storeFile": "C:\\Users\\40372\\.ohos\\config\\default_demo-plog_GrsMcWBBxyQUg5cFtnXOSSRDU8PrvqiVqbFO0e0Nphk=.p12",
+          "storePassword": "0000001A4313BC80057AC7B7693B099FE3E73D2C08745881F09CC9741077F573BAD9DAE29AF5EA326E2C"
         }
       }
     ],
@@ -19,9 +19,9 @@
       {
         "name": "default",
         "signingConfig": "default",
-        "compileSdkVersion": "26.0.0",
-        "compatibleSdkVersion": "26.0.0",
-        "targetSdkVersion": "26.0.0",
+        "compileSdkVersion": "6.0.2(22)",
+        "compatibleSdkVersion": "6.0.2(22)",
+        "targetSdkVersion": "6.0.2(22)",
         "runtimeOS": "HarmonyOS",
         "buildOption": {
           "strictMode": {
