@@ -1,0 +1,28 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Plog制作助手"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Plog制作助手"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Plog助手"
+    },
+    {
+      "name": "camera_reason",
+      "value": "用于拍摄Plog照片与视频记录"
+    },
+    {
+      "name": "microphone_reason",
+      "value": "用于记录Plog语音心情"
+    },
+    {
+      "name": "media_reason",
+      "value": "用于读取相册照片进行筛选与Plog制作"
+    }
+  ]
+}
