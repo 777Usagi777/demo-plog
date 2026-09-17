@@ -1,7 +1,13 @@
 import { router } from '@kit.ArkUI';
+import { picker, fileIo as fs } from '@kit.CoreFileKit';
+import { image } from '@kit.ImageKit';
+import { media } from '@kit.MediaKit';
+import { common } from '@kit.AbilityKit';
+import { pasteboard } from '@kit.BasicServicesKit';
+import { systemShare } from '@kit.ShareKit';
 import {
-  getTemplates, Template, PlogElement, CollabUser, VersionRecord,
-  getCollabUsers, getVersionRecords, aiAnalyzeTemplate
+  getTemplates, Template, PlogElement, CollabUser, VersionRecord, MaterialItem, CropRegion,
+  Stroke, AudioItem, getCollabUsers, getVersionRecords, aiAnalyzeTemplate, getPresetAudios
 } from '../model/Data';
 
 @Entry
@@ -13,6 +19,7 @@ struct Editor {
   @State users: CollabUser[] = getCollabUsers();
   @State versions: VersionRecord[] = getVersionRecords();
   @State showCollab: boolean = false;
+  @State collabMode: boolean = false; // 协同会话中：元素锁定生效
   @State selectedId: string = '';
   @State canvasW: number = 320;
   @State canvasH: number = 480;
@@ -24,7 +31,26 @@ struct Editor {
   @State showEditDialog: boolean = false;
   @State showVersionDlg: boolean = false;
   @State showBgmSheet: boolean = false;
+  @State showCutSheet: boolean = false;
+  @State showInviteDlg: boolean = false;
+  @State cutTargetId: string = '';
+  @State cutInfo: string = '';
+  @State materials: MaterialItem[] = [];
+  @State paintMode: boolean = false;
+  @State penColor: string = '#FF6B6B';
+  @State strokes: Stroke[] = [];
+  @State audioList: AudioItem[] = getPresetAudios();
+  @State playing: boolean = false;
+  @State playStatus: string = '';
+  @State inviteInfo: string = '';
   private pinchBase: Map<string, number> = new Map<string, number>();
+  private pixelMaps: Map<string, image.PixelMap> = new Map<string, image.PixelMap>();
+  private curStroke: Array<Array<number>> = [];
+  private curDrawId: string = '';
+  private player: media.AVPlayer | undefined = undefined;
+  private audioIdx: number = 0;
+  private paintCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
+  private mine: string = '我';
 
   aboutToAppear(): void {
     const p = router.getParams() as Record<string, string>;
@@ -50,15 +76,32 @@ struct Editor {
       }
     } else if (photos !== '') {
       const list = photos.split(',');
+      // 多图导入：第一张为背景，其余作为可拖拽元素铺在画布上
       this.bgImage = list[0];
-      this.elements = [
-        new PlogElement('p', 'PHOTO', list[0], 26, 26, 1, '#000000', 0, ''),
-        new PlogElement('t', 'TEXT', '记录今日份美好', 8, 8, 1, '#FFFFFF', 24, ''),
-        new PlogElement('h', 'HASHTAG', '#今日Plog', 8, 86, 1, '#FFD54A', 16, ''),
-      ];
+      const els: PlogElement[] = [];
+      const n = Math.min(list.length, 9);
+      for (let i = 0; i < n; i++) {
+        els.push(new PlogElement('p' + i, 'PHOTO', list[i],
+          6 + (i % 3) * 26, 22 + (i % 3) * 22, 1, '#000000', 0, ''));
+      }
+      els.push(new PlogElement('t', 'TEXT', '记录今日份美好', 8, 8, 1, '#FFFFFF', 24, ''));
+      els.push(new PlogElement('h', 'HASHTAG', '#今日Plog', 8, 90, 1, '#FFD54A', 16, ''));
+      this.elements = els;
     } else {
       this.loadSample();
     }
+    // 内置演示素材（示例图可作素材导入演示）
+    this.materials = [
+      new MaterialItem('m0', '咖啡杯', 'IMAGE', 'demo4', undefined),
+      new MaterialItem('m1', '纪念碑', 'IMAGE', 'demo2', undefined),
+      new MaterialItem('m2', '沙发', 'IMAGE', 'demo6', undefined),
+      new MaterialItem('m3', '气球', 'STICKER', '🎈', undefined),
+      new MaterialItem('m4', '蛋糕', 'STICKER', '🎂', undefined),
+    ];
+  }
+
+  aboutToDisappear(): void {
+    this.stopAudio();
   }
 
   loadSample(): void {
@@ -85,7 +128,49 @@ struct Editor {
     if (p === 'sample4') {
       return $r('app.media.sample4');
     }
+    if (p.indexOf('demo') === 0) {
+      return $r('app.media.' + p);
+    }
     return $r('app.media.sample1');
+  }
+
+  ownerColor(name: string): string {
+    if (name === '我') {
+      return '#3A7BFF';
+    }
+    if (name === '晓琳') {
+      return '#FF6B6B';
+    }
+    if (name === '阿哲') {
+      return '#20C997';
+    }
+    return '#8A8A8A';
+  }
+
+  // ---- 元素渲染源：支持抠图 PixelMap ----
+  elSrc(el: PlogElement): Resource | string {
+    if (el.text.startsWith('px:')) {
+      const pm = this.pixelMaps.get(el.text.slice(3));
+      if (pm !== undefined) {
+        return el.text; // 占位，实际走 pmSrc 分支
+      }
+    }
+    return this.uriOrRes(el.text);
+  }
+
+  pmSrc(el: PlogElement): image.PixelMap | undefined {
+    if (el.text.startsWith('px:')) {
+      return this.pixelMaps.get(el.text.slice(3));
+    }
+    return undefined;
+  }
+
+  // ---- 协同：元素是否可被"我"拖动 ----
+  canMove(el: PlogElement): boolean {
+    if (!this.collabMode) {
+      return true;
+    }
+    return el.owner === '' || el.owner === this.mine;
   }
 
   select(el: PlogElement): void {
@@ -93,6 +178,9 @@ struct Editor {
   }
 
   onPan(el: PlogElement, ev: PanGestureEvent): void {
+    if (!this.canMove(el)) {
+      return;
+    }
     const idx = this.elements.findIndex((e: PlogElement) => e.id === el.id);
     if (idx < 0 || this.canvasW <= 0 || this.canvasH <= 0) {
       return;
@@ -101,7 +189,7 @@ struct Editor {
     const ny = el.y + ev.offsetY / this.canvasH * 100;
     const copy = new PlogElement(el.id, el.type, el.text,
       Math.max(-8, Math.min(108, nx)), Math.max(-8, Math.min(108, ny)),
-      el.scale, el.color, el.fontSize, el.sticker);
+      el.scale, el.color, el.fontSize, el.sticker, el.owner);
     const arr = this.elements.slice();
     arr[idx] = copy;
     this.elements = arr;
@@ -114,7 +202,7 @@ struct Editor {
     }
     const base = this.pinchBase.get(el.id) ?? 1;
     const s = Math.max(0.3, Math.min(4, base * ev.scale));
-    const copy = new PlogElement(el.id, el.type, el.text, el.x, el.y, s, el.color, el.fontSize, el.sticker);
+    const copy = new PlogElement(el.id, el.type, el.text, el.x, el.y, s, el.color, el.fontSize, el.sticker, el.owner);
     const arr = this.elements.slice();
     arr[idx] = copy;
     this.elements = arr;
@@ -134,7 +222,7 @@ struct Editor {
     if (idx < 0) {
       return;
     }
-    const copy = new PlogElement(sel.id, sel.type, sel.text, sel.x, sel.y, s, sel.color, sel.fontSize, sel.sticker);
+    const copy = new PlogElement(sel.id, sel.type, sel.text, sel.x, sel.y, s, sel.color, sel.fontSize, sel.sticker, sel.owner);
     const arr = this.elements.slice();
     arr[idx] = copy;
     this.elements = arr;
@@ -153,6 +241,391 @@ struct Editor {
     const el = new PlogElement(id, 'TEXT', '双击我改文字', 30, 30, 1, '#FFFFFF', 22, '');
     this.elements = this.elements.concat([el]);
     this.selectedId = id;
+  }
+
+  // ---- 长按抠图提取 ----
+  onLongPressCut(el: PlogElement): void {
+    this.cutTargetId = el.id;
+    let info = '将把「' + (el.type === 'PHOTO' || el.type === 'CUTOUT' ? '图片' : el.text) +
+      '」抠图提取到下方素材库';
+    if (el.type !== 'PHOTO' && el.type !== 'CUTOUT') {
+      info += '（图形/文字将生成贴纸素材）';
+    }
+    this.cutInfo = info;
+    this.showCutSheet = true;
+  }
+
+  async confirmCut(): Promise<void> {
+    const el = this.selectedEl();
+    if (!el) {
+      this.showCutSheet = false;
+      return;
+    }
+    const mid = 'cut' + this.materials.length + '_' + new Date().getTime();
+    if (el.type === 'PHOTO' || el.type === 'CUTOUT') {
+      if (el.text.startsWith('file://') && this.canvasW > 0 && this.canvasH > 0) {
+        // 真抠图：按元素所在区域裁剪原图（模拟抠图，真机接入分割模型后为透明底）
+        const ok = await this.cropToMaterial(mid, el);
+        if (ok) {
+          this.materials = this.materials.concat([new MaterialItem(mid, '抠图素材', 'CUTOUT', 'px:' + mid,
+            this.lastRegion)]);
+        } else {
+          this.materials = this.materials.concat([new MaterialItem(mid, '抠图素材', 'IMAGE', el.text, undefined)]);
+        }
+      } else {
+        this.materials = this.materials.concat([new MaterialItem(mid, '图片素材', 'IMAGE', el.text, undefined)]);
+      }
+    } else if (el.type === 'STICKER') {
+      this.materials = this.materials.concat([new MaterialItem(mid, '贴纸', 'STICKER', el.text, undefined)]);
+    } else {
+      this.materials = this.materials.concat([new MaterialItem(mid, '文字素材', 'TEXT', el.text, undefined)]);
+    }
+    this.showCutSheet = false;
+    this.savedAt = '已提取素材到素材库，点击素材可拖到画布上编辑';
+  }
+
+  private lastRegion: CropRegion | undefined = undefined;
+
+  async cropToMaterial(mid: string, el: PlogElement): Promise<boolean> {
+    try {
+      const path = el.text;
+      const src = image.createImageSource(path);
+      const info = await src.getImageInfo();
+      const full = await src.createPixelMap();
+      const sw = info.size.width;
+      const sh = info.size.height;
+      const kw = sw / this.canvasW;
+      const kh = sh / this.canvasH;
+      const cw = 150 * el.scale * kw;
+      const ch = 170 * el.scale * kh;
+      const cx = el.x / 100 * sw;
+      const cy = el.y / 100 * sh;
+      const left = Math.max(0, Math.floor(cx - cw / 2));
+      const top = Math.max(0, Math.floor(cy - ch / 2));
+      const width = Math.min(sw - left, Math.floor(cw));
+      const height = Math.min(sh - top, Math.floor(ch));
+      if (width <= 4 || height <= 4) {
+        src.release();
+        full.release();
+        return false;
+      }
+      const region: image.Region = { x: left, y: top, size: { width: width, height: height } };
+      const cropped = await full.createCroppedAndScaledPixelMap(region, width, height);
+      this.pixelMaps.set(mid, cropped);
+      this.lastRegion = new CropRegion(left, top, width, height);
+      src.release();
+      full.release();
+      return true;
+    } catch (e) {
+      console.error('crop fail', JSON.stringify(e));
+      return false;
+    }
+  }
+
+  // ---- 素材库 ----
+  async onImportMaterial(): Promise<void> {
+    try {
+      const photoPicker = new picker.PhotoViewPicker();
+      const opt = new picker.PhotoSelectOptions();
+      opt.MIMEType = picker.PhotoViewMIMETypes.IMAGE_TYPE;
+      opt.maxSelectNumber = 9;
+      const res = await photoPicker.select(opt);
+      const add: MaterialItem[] = [];
+      for (let i = 0; i < res.photoUris.length; i++) {
+        add.push(new MaterialItem('imp' + this.materials.length + '_' + i,
+          '导入素材' + (i + 1), 'IMAGE', res.photoUris[i], undefined));
+      }
+      this.materials = this.materials.concat(add);
+      if (add.length > 0) {
+        this.savedAt = '已导入 ' + add.length + ' 个素材，点击可加到画布（可拖拽/缩放）';
+      }
+    } catch (e) {
+      console.error('import material fail', JSON.stringify(e));
+    }
+  }
+
+  addMaterialToCanvas(m: MaterialItem): void {
+    const id = 'mat' + this.elements.length + '_' + new Date().getTime();
+    let el: PlogElement;
+    if (m.kind === 'CUTOUT') {
+      el = new PlogElement(id, 'CUTOUT', 'px:' + m.id, 30, 30, 1, '#000000', 0, '');
+    } else if (m.kind === 'IMAGE') {
+      el = new PlogElement(id, 'PHOTO', m.source, 30, 30, 1, '#000000', 0, '');
+    } else if (m.kind === 'STICKER') {
+      el = new PlogElement(id, 'STICKER', m.source, 30, 30, 1, '#FF7043', 0, '');
+    } else {
+      el = new PlogElement(id, 'TEXT', m.source, 30, 30, 1, '#FFFFFF', 20, '');
+    }
+    this.elements = this.elements.concat([el]);
+    this.selectedId = id;
+  }
+
+  // ---- 协同邀请（微信） ----
+  inviteContent(): string {
+    return '邀请你加入 Plog 协同编辑：一起在一张图上写写画画、拖素材，每个元素同一时间只能由一人操作。' +
+      '（演示链接）https://plog.demo/invite?room=abc123';
+  }
+
+  async copyInvite(): Promise<void> {
+    try {
+      const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.inviteContent());
+      await pasteboard.getSystemPasteboard().setData(data);
+      this.inviteInfo = '邀请链接已复制，去微信粘贴发送给好友';
+    } catch (e) {
+      this.inviteInfo = '复制失败，请重试';
+    }
+  }
+
+  async shareToWeChat(): Promise<void> {
+    try {
+      const sd = new systemShare.SharedData({
+        utd: 'general.plain-text',
+        content: this.inviteContent(),
+        title: 'Plog 协同编辑邀请'
+      });
+      const ctl = new systemShare.ShareController(sd);
+      await ctl.show(getContext(this) as common.UIAbilityContext, {});
+      this.inviteInfo = '已打开系统分享，选择微信发送即可邀请好友';
+    } catch (e) {
+      this.inviteInfo = '系统分享不可用，已复制到剪贴板（可发微信）';
+      this.copyInvite();
+    }
+  }
+
+  simulatePeerJoin(): void {
+    this.collabMode = true;
+    this.users = [
+      new CollabUser('我', '#3A7BFF', true, '正在编辑'),
+      new CollabUser('晓琳', '#FF6B6B', false, '已通过微信邀请加入'),
+    ];
+    this.showInviteDlg = false;
+    this.showCollab = true;
+    this.inviteInfo = '晓琳已加入协同：元素锁定生效，每人同一时间只能拖动一个元素';
+  }
+
+  // 锁定：把选中的元素锁定给某个协作者（仅 owner 可拖动）
+  lockTo(name: string): void {
+    const sel = this.selectedEl();
+    if (!sel) {
+      return;
+    }
+    const idx = this.elements.findIndex((e: PlogElement) => e.id === sel.id);
+    if (idx < 0) {
+      return;
+    }
+    const copy = new PlogElement(sel.id, sel.type, sel.text, sel.x, sel.y, sel.scale, sel.color, sel.fontSize,
+      sel.sticker, name);
+    const arr = this.elements.slice();
+    arr[idx] = copy;
+    this.elements = arr;
+    this.savedAt = '元素已锁定给「' + name + '」，只有 TA 能拖动';
+  }
+
+  unlockSelected(): void {
+    const sel = this.selectedEl();
+    if (!sel) {
+      return;
+    }
+    const idx = this.elements.findIndex((e: PlogElement) => e.id === sel.id);
+    if (idx < 0) {
+      return;
+    }
+    const copy = new PlogElement(sel.id, sel.type, sel.text, sel.x, sel.y, sel.scale, sel.color, sel.fontSize,
+      sel.sticker, '');
+    const arr = this.elements.slice();
+    arr[idx] = copy;
+    this.elements = arr;
+    this.savedAt = '元素已解锁，所有人都可拖动';
+  }
+
+  // ---- 画笔涂鸦（多人可一起画） ----
+  togglePaint(): void {
+    this.paintMode = !this.paintMode;
+    if (this.paintMode) {
+      this.savedAt = '画笔已开启：直接在图面上画，协同时可多人一起画';
+    } else {
+      this.savedAt = '画笔已关闭';
+    }
+  }
+
+  onPaintTouch(ev: TouchEvent): void {
+    if (!this.paintMode || this.canvasW <= 0 || this.canvasH <= 0) {
+      return;
+    }
+    const t = ev.touches[0];
+    if (ev.type === TouchType.Down) {
+      this.curDrawId = 's' + new Date().getTime();
+      this.curStroke = [[t.x / this.canvasW, t.y / this.canvasH]];
+    } else if (ev.type === TouchType.Move) {
+      this.curStroke.push([t.x / this.canvasW, t.y / this.canvasH]);
+      this.drawStrokes();
+    } else if (ev.type === TouchType.Up || ev.type === TouchType.Cancel) {
+      if (this.curStroke.length >= 2) {
+        const s = new Stroke(this.curDrawId, this.penColor, 4, this.mine, this.curStroke.slice());
+        this.strokes = this.strokes.concat([s]);
+      }
+      this.curStroke = [];
+      this.drawStrokes();
+    }
+  }
+
+  simulatePeerDraw(): void {
+    const w = this.canvasW;
+    const h = this.canvasH;
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    const pts: Array<Array<number>> = [];
+    for (let i = 0; i <= 12; i++) {
+      pts.push([0.2 + i * 0.05 + Math.random() * 0.02, 0.35 + Math.sin(i * 0.5) * 0.06]);
+    }
+    const s = new Stroke('peer' + new Date().getTime(), '#FF6B6B', 5, '晓琳', pts);
+    this.strokes = this.strokes.concat([s]);
+    this.drawStrokes();
+    this.savedAt = '👥 晓琳画了一笔（两人可同时在图上写写画画）';
+  }
+
+  drawStrokes(): void {
+    const ctx = this.paintCtx;
+    if (!ctx || this.canvasW <= 0 || this.canvasH <= 0) {
+      return;
+    }
+    ctx.clearRect(0, 0, this.canvasW, this.canvasH);
+    for (const s of this.strokes) {
+      ctx.beginPath();
+      ctx.lineWidth = s.width;
+      ctx.strokeStyle = s.color;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (let i = 0; i < s.points.length; i++) {
+        const x = s.points[i][0] * this.canvasW;
+        const y = s.points[i][1] * this.canvasH;
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    }
+    if (this.curStroke.length >= 1 && this.paintMode) {
+      ctx.beginPath();
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = this.penColor;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (let i = 0; i < this.curStroke.length; i++) {
+        const x = this.curStroke[i][0] * this.canvasW;
+        const y = this.curStroke[i][1] * this.canvasH;
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    }
+  }
+
+  // ---- BGM / MP3 ----
+  setBgmByName(name: string): void {
+    const item = this.audioList.find((a: AudioItem) => a.name === name);
+    if (item) {
+      this.selectAudio(item);
+    }
+    this.showBgmSheet = false;
+  }
+
+  async selectAudio(item: AudioItem): Promise<void> {
+    this.bgm = item.name;
+    if (item.path === '') {
+      this.stopAudio();
+      this.playing = false;
+      this.playStatus = '内置音轨演示：' + item.name;
+      return;
+    }
+    try {
+      const av: media.AVPlayer = await media.createAVPlayer();
+      this.player = av;
+      av.on('stateChange', (state: media.AVPlayerState) => {
+        if (state === 'prepared') {
+          av.play();
+          this.playing = true;
+          this.playStatus = '正在播放：' + item.name;
+        }
+      });
+      av.url = 'file://' + item.path;
+      av.prepare();
+    } catch (e) {
+      this.playStatus = '播放失败，可换一首试试';
+      console.error('play fail', JSON.stringify(e));
+    }
+  }
+
+  togglePlay(): void {
+    const item = this.audioList.find((a: AudioItem) => a.name === this.bgm);
+    if (!item || item.path === '') {
+      return;
+    }
+    const av = this.player;
+    if (!av) {
+      return;
+    }
+    if (this.playing) {
+      av.pause();
+      this.playing = false;
+      this.playStatus = '已暂停';
+    } else {
+      av.play();
+      this.playing = true;
+      this.playStatus = '继续播放：' + item.name;
+    }
+  }
+
+  stopAudio(): void {
+    const av = this.player;
+    if (av) {
+      try {
+        av.stop();
+        av.release();
+      } catch (e) {
+        console.error('stop fail', JSON.stringify(e));
+      }
+      this.player = undefined;
+    }
+    this.playing = false;
+  }
+
+  async importAudio(): Promise<void> {
+    try {
+      const audioPicker = new picker.AudioViewPicker();
+      const opt = new picker.AudioSelectOptions();
+      opt.maxSelectNumber = 5;
+      const uris: string[] = await audioPicker.select(opt);
+      for (let i = 0; i < uris.length; i++) {
+        const uri = uris[i];
+        const name = '导入音频' + (i + 1);
+        let dest = '';
+        try {
+          const f = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+          dest = getContext(this).filesDir + '/bgm_' + this.audioIdx + '.mp3';
+          this.audioIdx++;
+          fs.copyFileSync(f.fd, dest);
+          fs.closeSync(f.fd);
+        } catch (e) {
+          console.error('copy audio fail', JSON.stringify(e));
+          dest = '';
+        }
+        this.audioList = this.audioList.concat([new AudioItem(name, dest, false, '🎵')]);
+        if (i === 0 && dest !== '') {
+          this.selectAudio(this.audioList[this.audioList.length - 1]);
+        }
+      }
+      this.showBgmSheet = true;
+      this.bgm = this.bgm;
+    } catch (e) {
+      console.error('import audio fail', JSON.stringify(e));
+    }
   }
 
   reuseTemplate(t: Template): void {
@@ -212,7 +685,8 @@ struct Editor {
     if (sel) {
       const idx = this.elements.findIndex((e: PlogElement) => e.id === sel.id);
       if (idx >= 0) {
-        const copy = new PlogElement(sel.id, sel.type, this.editText, sel.x, sel.y, sel.scale, sel.color, sel.fontSize, sel.sticker);
+        const copy = new PlogElement(sel.id, sel.type, this.editText, sel.x, sel.y, sel.scale, sel.color,
+          sel.fontSize, sel.sticker, sel.owner);
         const arr = this.elements.slice();
         arr[idx] = copy;
         this.elements = arr;
@@ -221,28 +695,28 @@ struct Editor {
     this.showEditDialog = false;
   }
 
-  setBgm(name: string): void {
-    this.bgm = name;
-    this.showBgmSheet = false;
-  }
+  // ==================== UI ====================
 
   @Builder
   collabOverlay() {
     if (this.showCollab) {
-      Column({ space: 8 }) {
+      Column({ space: 6 }) {
         ForEach(this.users, (u: CollabUser) => {
           Row({ space: 4 }) {
             Text(u.name.charAt(0)).fontSize(10).fontColor(Color.White)
               .width(18).height(18).textAlign(TextAlign.Center)
-              .backgroundColor(u.color).borderRadius(9)
-            Text(u.action).fontSize(10).fontColor(u.color)
+              .backgroundColor(this.ownerColor(u.name)).borderRadius(9)
+            Text(u.action).fontSize(10).fontColor(this.ownerColor(u.name))
           }
         }, (u: CollabUser) => u.name)
+        if (this.collabMode) {
+          Text('🔒 元素锁定：一人一动，防冲突').fontSize(9).fontColor('#E53935')
+        }
       }
       .padding(8)
       .backgroundColor('rgba(255,255,255,0.85)')
       .borderRadius(10)
-      .position({ x: 8, y: 8 })
+      .position({ x: 8, y: 120 })
     }
   }
 
@@ -258,14 +732,42 @@ struct Editor {
   }
 
   @Builder
+  materialCell(m: MaterialItem) {
+    Column({ space: 2 }) {
+      if (m.kind === 'STICKER' || m.kind === 'TEXT') {
+        Text(m.source).fontSize(26).width(52).height(52).textAlign(TextAlign.Center)
+          .backgroundColor('#F0F2F7').borderRadius(10)
+      } else {
+        if (m.kind === 'CUTOUT' && this.pixelMaps.has(m.id)) {
+          Image(this.pixelMaps.get(m.id) as image.PixelMap)
+            .width(52).height(52).objectFit(ImageFit.Cover).borderRadius(10)
+        } else {
+          Image(this.uriOrRes(m.source))
+            .width(52).height(52).objectFit(ImageFit.Cover).borderRadius(10)
+        }
+      }
+      Text(m.name).fontSize(9).fontColor('#666').maxLines(1)
+    }
+    .onClick(() => this.addMaterialToCanvas(m))
+  }
+
+  @Builder
   elView(el: PlogElement) {
     Stack() {
-      if (el.type === 'PHOTO') {
-        Image(this.uriOrRes(el.text))
-          .width(150)
-          .height(170)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(10)
+      if (el.type === 'PHOTO' || el.type === 'CUTOUT') {
+        if (el.text.startsWith('px:')) {
+          Image(this.pixelMaps.get(el.text.slice(3)) as image.PixelMap)
+            .width(150)
+            .height(170)
+            .objectFit(ImageFit.Cover)
+            .borderRadius(10)
+        } else {
+          Image(this.uriOrRes(el.text))
+            .width(150)
+            .height(170)
+            .objectFit(ImageFit.Cover)
+            .borderRadius(10)
+        }
       } else if (el.type === 'STICKER') {
         Text(el.text)
           .fontSize(40 * el.scale)
@@ -276,6 +778,14 @@ struct Editor {
           .fontColor(el.color)
           .fontWeight(el.type === 'HASHTAG' ? FontWeight.Normal : FontWeight.Bold)
           .textShadow({ radius: 3, color: 'rgba(0,0,0,0.5)', offsetX: 0, offsetY: 1 })
+      }
+      if (this.collabMode && el.owner !== '') {
+        Text('🔒' + el.owner)
+          .fontSize(9).fontColor(Color.White)
+          .backgroundColor(this.ownerColor(el.owner))
+          .padding({ left: 5, right: 5, top: 2, bottom: 2 })
+          .borderRadius(6)
+          .position({ x: 0, y: -20 })
       }
     }
     .border({
@@ -293,6 +803,36 @@ struct Editor {
         .onActionStart(() => this.pinchBase.set(el.id, el.scale))
         .onActionUpdate((ev: GestureEvent) => this.onPinch(el, ev))
     )
+    .gesture(
+      LongPressGesture()
+        .onActionEnd(() => this.onLongPressCut(el))
+    )
+  }
+
+  @Builder
+  materialBar() {
+    Column({ space: 4 }) {
+      Row({ space: 6 }) {
+        Text('🧰 素材库').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#1A1A1A')
+        Text('长按画布元素可抠图提取 · 点击素材添加到画布').fontSize(10).fontColor('#8A8A8A')
+        Blank()
+        Text('＋导入素材').fontSize(13).fontColor('#3A7BFF').onClick(() => this.onImportMaterial())
+      }
+      .width('100%')
+
+      Scroll() {
+        Row({ space: 10 }) {
+          ForEach(this.materials, (m: MaterialItem) => {
+            this.materialCell(m)
+          }, (m: MaterialItem) => m.id)
+        }
+      }
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .width('100%')
+    }
+    .width('100%')
+    .padding({ top: 12 })
   }
 
   build() {
@@ -321,6 +861,13 @@ struct Editor {
               ForEach(this.elements, (el: PlogElement) => {
                 this.elView(el)
               }, (el: PlogElement) => el.id)
+              if (this.paintMode) {
+                Canvas(this.paintCtx)
+                  .width('100%')
+                  .height(520)
+                  .onReady(() => this.drawStrokes())
+                  .onTouch((ev: TouchEvent) => this.onPaintTouch(ev))
+              }
             }
             .width('100%')
             .height(520)
@@ -331,23 +878,46 @@ struct Editor {
             .onAreaChange((oldValue: Area, newValue: Area) => {
               this.canvasW = newValue.width as number;
               this.canvasH = newValue.height as number;
+              this.drawStrokes();
             })
             .overlay(this.collabOverlay())
 
             // 选中元素操作条
             if (this.selectedEl() !== undefined) {
-              Row({ space: 10 }) {
-                Button('＋') .onClick(() => this.scaleSelected(0.2)).height(34)
-                Button('－') .onClick(() => this.scaleSelected(-0.2)).height(34)
-                Button('编辑') .onClick(() => this.onEditText()).height(34)
-                Button('删除') .onClick(() => this.deleteSelected()).height(34)
+              Row({ space: 8 }) {
+                Button('＋') .onClick(() => this.scaleSelected(0.2)).height(32)
+                Button('－') .onClick(() => this.scaleSelected(-0.2)).height(32)
+                Button('编辑') .onClick(() => this.onEditText()).height(32)
+                Button('删除') .onClick(() => this.deleteSelected()).height(32)
+                if (this.collabMode) {
+                  Button('🔒锁定') .height(32).backgroundColor('#FF6B6B')
+                    .onClick(() => this.lockTo('我'))
+                    .enabled(this.selectedEl()?.owner !== '我')
+                  Button('🔓解锁') .height(32).backgroundColor('#8A8A8A')
+                    .onClick(() => this.unlockSelected())
+                    .enabled(this.selectedEl()?.owner !== '')
+                }
               }
               .margin({ top: 8 })
+              if (this.collabMode) {
+                Text('锁定后只有对应的人能拖动该元素，避免多人冲突').fontSize(10).fontColor('#8A8A8A')
+                  .width('100%').margin({ top: 2 })
+              }
             }
 
-            // 协同/版本/BGM/语音条
+            // 素材库
+            this.materialBar()
+
+            // 功能条
             Row({ space: 6 }) {
-              this.chip('👥协同', this.showCollab, () => this.showCollab = !this.showCollab)
+              this.chip('👥协同', this.showCollab, () => {
+                if (!this.collabMode) {
+                  this.showInviteDlg = true;
+                } else {
+                  this.showCollab = !this.showCollab;
+                }
+              })
+              this.chip('🎨画笔', this.paintMode, () => this.togglePaint())
               this.chip('🕘版本', false, () => this.showVersionDlg = true)
               this.chip('🎵' + this.bgm, this.bgm !== '无BGM', () => this.showBgmSheet = true)
               this.chip('🎙️语音', this.voiceNote !== '', () => this.recordVoice())
@@ -356,9 +926,41 @@ struct Editor {
             .width('100%')
             .margin({ top: 12 })
 
+            if (this.paintMode && this.collabMode) {
+              Row({ space: 8 }) {
+                Text('👥 让晓琳画一笔').fontSize(12).fontColor('#3A7BFF')
+                  .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+                  .backgroundColor('#E8F0FF').borderRadius(14)
+                  .onClick(() => this.simulatePeerDraw())
+                Text('笔色').fontSize(12).fontColor('#333').padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                  .backgroundColor(Color.White).borderRadius(14)
+                  .onClick(() => {
+                    this.penColor = this.penColor === '#FF6B6B' ? '#20C997' : '#FF6B6B';
+                  })
+                if (this.playing) {
+                  Text('⏸ 暂停').fontSize(12).fontColor('#3A7BFF')
+                    .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                    .backgroundColor('#E8F0FF').borderRadius(14)
+                    .onClick(() => this.togglePlay())
+                }
+              }
+              .width('100%')
+              .margin({ top: 8 })
+            } else if (this.playing) {
+              Row({ space: 8 }) {
+                Text('⏸ 暂停').fontSize(12).fontColor('#3A7BFF')
+                  .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+                  .backgroundColor('#E8F0FF').borderRadius(14)
+                  .onClick(() => this.togglePlay())
+                Text(this.playStatus).fontSize(11).fontColor('#8A8A8A')
+              }
+              .width('100%')
+              .margin({ top: 8 })
+            }
+
             // 标签
             Row({ space: 6 }) {
-              ForEach(['旅行', '美食', '穿搭', 'OOTD'], (tag: string) => {
+              ForEach(['旅行', '美食', '穿搭', '生日派对', '纪念碑', '家居'], (tag: string) => {
                 this.chip('#' + tag, this.tags.indexOf(tag) >= 0, () => this.toggleTag(tag))
               }, (tag: string) => tag)
             }
@@ -373,6 +975,9 @@ struct Editor {
               if (this.savedAt !== '') {
                 Text(this.savedAt).fontSize(12).fontColor('#20C997')
               }
+              if (this.playStatus !== '' && this.playStatus.indexOf('暂停') < 0 && !this.playing && this.bgm !== '无BGM') {
+                Text(this.playStatus).fontSize(11).fontColor('#8A8A8A')
+              }
             }
             .width('100%')
             .alignItems(HorizontalAlign.Start)
@@ -382,16 +987,20 @@ struct Editor {
             Text('复用模板（可编辑）').fontSize(15).fontWeight(FontWeight.Bold).fontColor('#1A1A1A')
               .width('100%')
               .margin({ top: 16 })
-            Row({ space: 8 }) {
-              ForEach(this.templates, (t: Template) => {
-                Column({ space: 4 }) {
-                  Image(this.uriOrRes(t.cover))
-                    .width(72).height(92).objectFit(ImageFit.Cover).borderRadius(8)
-                  Text(t.name).fontSize(11).fontColor('#333')
-                }
-                .onClick(() => this.reuseTemplate(t))
-              }, (t: Template) => t.id)
+            Scroll() {
+              Row({ space: 8 }) {
+                ForEach(this.templates, (t: Template) => {
+                  Column({ space: 4 }) {
+                    Image(this.uriOrRes(t.cover))
+                      .width(72).height(92).objectFit(ImageFit.Cover).borderRadius(8)
+                    Text(t.name).fontSize(11).fontColor('#333')
+                  }
+                  .onClick(() => this.reuseTemplate(t))
+                }, (t: Template) => t.id)
+              }
             }
+            .scrollable(ScrollDirection.Horizontal)
+            .scrollBar(BarState.Off)
             .width('100%')
 
             Blank().height(30)
@@ -423,6 +1032,58 @@ struct Editor {
           }
           .width('100%')
           .margin({ top: 16 })
+        }
+        .width('85%')
+        .padding(20)
+        .backgroundColor(Color.White)
+        .borderRadius(16)
+      }
+
+      // 弹层：长按抠图提取
+      if (this.showCutSheet) {
+        this.maskLayer()
+        Column() {
+          Text('✂️ 抠图提取到素材库').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#1A1A1A')
+          Text(this.cutInfo).fontSize(12).fontColor('#666').margin({ top: 10 })
+          Text('（演示为区域裁剪模拟，接入分割大模型后输出透明底抠图）')
+            .fontSize(10).fontColor('#8A8A8A').margin({ top: 4 })
+          Row({ space: 12 }) {
+            Button('取消').layoutWeight(1).backgroundColor('#E5E5E5').fontColor('#333')
+              .onClick(() => this.showCutSheet = false)
+            Button('提取到素材库').layoutWeight(1).backgroundColor('#3A7BFF')
+              .onClick(() => this.confirmCut())
+          }
+          .width('100%')
+          .margin({ top: 16 })
+        }
+        .width('85%')
+        .padding(20)
+        .backgroundColor(Color.White)
+        .borderRadius(16)
+      }
+
+      // 弹层：协同邀请（微信）
+      if (this.showInviteDlg) {
+        this.maskLayer()
+        Column() {
+          Text('👥 邀请微信好友协同编辑').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#1A1A1A')
+          Text(this.inviteContent()).fontSize(11).fontColor('#666').lineHeight(16).margin({ top: 10 })
+          Text('好友通过链接进入后，两人可在一张图上一起写写画画、拖素材；每个元素同一时间只能由一个人操作。')
+            .fontSize(10).fontColor('#8A8A8A').lineHeight(15).margin({ top: 8 })
+          Button('分享到微信（系统分享面板）')
+            .width('100%').margin({ top: 14 }).backgroundColor('#07C160')
+            .onClick(() => this.shareToWeChat())
+          Row({ space: 12 }) {
+            Button('复制邀请链接').layoutWeight(1).backgroundColor('#E5E5E5').fontColor('#333')
+              .onClick(() => this.copyInvite())
+            Button('演示：晓琳加入').layoutWeight(1).backgroundColor('#3A7BFF')
+              .onClick(() => this.simulatePeerJoin())
+          }
+          .width('100%')
+          .margin({ top: 12 })
+          if (this.inviteInfo !== '') {
+            Text(this.inviteInfo).fontSize(11).fontColor('#20C997').margin({ top: 8 })
+          }
         }
         .width('85%')
         .padding(20)
@@ -464,26 +1125,42 @@ struct Editor {
         .borderRadius(16)
       }
 
-      // 弹层：BGM 选择
+      // 弹层：BGM / MP3 选择
       if (this.showBgmSheet) {
         this.maskLayer()
         Column() {
-          Text('选择背景音乐 (BGM)').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#1A1A1A')
+          Row() {
+            Text('选择背景音乐 (BGM)').fontSize(16).fontWeight(FontWeight.Bold).fontColor('#1A1A1A')
+            Blank()
+            Text('＋导入MP3').fontSize(13).fontColor('#3A7BFF').onClick(() => this.importAudio())
+          }
+          .width('100%')
           Column({ space: 8 }) {
-            ForEach(['🎵 轻音乐', '🌊 海边白噪音', '🎷 爵士', '🔇 无BGM'], (b: string) => {
-              Text(b)
-                .fontSize(14)
-                .fontColor(this.bgm === b ? '#3A7BFF' : '#333')
-                .width('100%')
-                .textAlign(TextAlign.Center)
-                .padding(12)
-                .backgroundColor(this.bgm === b ? '#E8F0FF' : '#F5F6FA')
-                .borderRadius(10)
-                .onClick(() => this.setBgm(b))
-            }, (b: string) => b)
+            ForEach(this.audioList, (a: AudioItem) => {
+              Row({ space: 8 }) {
+                Text(a.icon).fontSize(14)
+                Text(a.name).fontSize(14)
+                  .fontColor(this.bgm === a.name ? '#3A7BFF' : '#333')
+                  .layoutWeight(1)
+                if (a.path !== '' && this.bgm === a.name) {
+                  Text(this.playing ? '⏸' : '▶').fontSize(14).onClick(() => this.togglePlay())
+                }
+              }
+              .width('100%')
+              .padding(12)
+              .backgroundColor(this.bgm === a.name ? '#E8F0FF' : '#F5F6FA')
+              .borderRadius(10)
+              .onClick(() => this.setBgmByName(a.name))
+            }, (a: AudioItem) => a.name + a.path)
           }
           .width('100%')
           .margin({ top: 12 })
+          if (this.playStatus !== '') {
+            Text(this.playStatus).fontSize(11).fontColor('#20C997').margin({ top: 6 })
+          }
+          Button('关闭').width('100%').backgroundColor('#E5E5E5').fontColor('#333')
+            .onClick(() => this.showBgmSheet = false)
+            .margin({ top: 12 })
         }
         .width('85%')
         .padding(20)
@@ -505,6 +1182,8 @@ struct Editor {
         this.showEditDialog = false;
         this.showVersionDlg = false;
         this.showBgmSheet = false;
+        this.showCutSheet = false;
+        this.showInviteDlg = false;
       })
   }
 }

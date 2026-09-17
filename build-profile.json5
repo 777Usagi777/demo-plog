@@ -7,18 +7,18 @@
         "material": {
           "certpath": "C:\\Users\\l00981356\\.ohos\\config\\default_gewu-demo_ogg1CKeehdvZ7TUoiPxwWfyqFZmm6mCo239sLDmCHAU=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B569A781E9D4DB01EE3F0131A1078933FC3A09BCE85BAF8C5BAD9295D0208ED698811E35E1BA588",
+          "keyPassword": "0000001B6DFF90E052D3253C4EC9A486C57FA1A3B12DF74B18E5747F3BBB2686E55AD78B5BFE41EE6B9903",
           "profile": "C:\\Users\\l00981356\\.ohos\\config\\default_gewu-demo_ogg1CKeehdvZ7TUoiPxwWfyqFZmm6mCo239sLDmCHAU=.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "C:\\Users\\l00981356\\.ohos\\config\\default_gewu-demo_ogg1CKeehdvZ7TUoiPxwWfyqFZmm6mCo239sLDmCHAU=.p12",
-          "storePassword": "0000001B18969DCA12C613A8374BBA2784CDDF06611C670162E9850CF0A347403981A8AC7EC850D7778980"
+          "storePassword": "0000001BB64D831060D0710D221602DBFA58144AEB2045F2144A36845227316DBDD760F3BEBCA1ED714BF3"
         }
       }
     ],
     "products": [
       {
         "name": "default",
-        "signingConfig": "",
+        "signingConfig": "default",
         "compileSdkVersion": "26.0.0",
         "compatibleSdkVersion": "26.0.0",
         "targetSdkVersion": "26.0.0",

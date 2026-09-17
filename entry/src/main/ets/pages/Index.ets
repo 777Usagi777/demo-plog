@@ -30,14 +30,14 @@ struct Index {
         Column({ space: 12 }) {
           // 功能卡片
           Row({ space: 12 }) {
-            this.featureCard('🎨', '模板拆解', 'AI提取优质Plog的元素与排版，可编辑复用', 'pages/Editor')
-            this.featureCard('👥', '多人协同', '共同编辑、版本记录、语音/BGM记录', 'pages/Editor')
+            this.featureCard('🎨', '模板拆解', '多图导入·长按抠图·素材库·编辑组合·BGM/MP3', 'pages/Editor')
+            this.featureCard('👥', '多人协同', '微信邀请·同图写画拖拽·元素锁定防冲突', 'pages/Editor')
           }
           .width('100%')
 
           Row({ space: 12 }) {
-            this.featureCard('📸', '拍摄机位', '人物/景物机位参考、仰拍俯拍姿势建议', 'pages/Camera')
-            this.featureCard('🗂️', '照片筛选', '批量上传去废片、按人物/描述分类', 'pages/Camera')
+            this.featureCard('📸', '拍摄机位', '多人骨架姿态参考+摄影师文字建议', 'pages/Camera')
+            this.featureCard('🗂️', '照片筛选', '批量上传·好片废片分组拖拽·人物/生日分类', 'pages/Camera')
           }
           .width('100%')
 
@@ -95,11 +95,26 @@ struct Index {
     })
   }
 
+  uriOrRes(p: string): Resource | string {
+    if (p === 'sample2') {
+      return $r('app.media.sample2');
+    }
+    if (p === 'sample3') {
+      return $r('app.media.sample3');
+    }
+    if (p === 'sample4') {
+      return $r('app.media.sample4');
+    }
+    if (p.indexOf('demo') === 0) {
+      return $r('app.media.' + p);
+    }
+    return $r('app.media.sample1');
+  }
+
   @Builder
   templateCard(t: Template) {
     Row({ space: 12 }) {
-      Image(t.cover === 'sample1' ? $r('app.media.sample1') :
-        t.cover === 'sample2' ? $r('app.media.sample2') : $r('app.media.sample3'))
+      Image(this.uriOrRes(t.cover))
         .width(90)
         .height(110)
         .borderRadius(10)
