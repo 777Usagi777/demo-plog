@@ -9,6 +9,23 @@ import {
   getTemplates, Template, PlogElement, CollabUser, VersionRecord, MaterialItem, CropRegion,
   Stroke, AudioItem, getCollabUsers, getVersionRecords, aiAnalyzeTemplate, getPresetAudios
 } from '../model/Data';
+import { AIService } from '../model/LLM';
+
+interface AiTplElement {
+  type: string;
+  text: string;
+  x: number;
+  y: number;
+  scale: number;
+  color: string;
+  fontSize: number;
+}
+
+interface AiTplResp {
+  name: string;
+  desc: string;
+  elements: Array<AiTplElement>;
+}
 
 @Entry
 @Component
@@ -53,6 +70,9 @@ struct Editor {
   private mine: string = '我';
 
   aboutToAppear(): void {
+    AIService.init(getContext(this)).catch((e: Error) => {
+      console.error('AI init fail', JSON.stringify(e));
+    });
     const p = router.getParams() as Record<string, string>;
     let tid = '';
     let photos = '';
@@ -63,9 +83,7 @@ struct Editor {
       ai = p['ai'] ?? '';
     }
     if (ai === '1') {
-      const t = aiAnalyzeTemplate();
-      this.bgImage = t.cover;
-      this.elements = t.elements.slice();
+      this.runAiAnalyze();
     } else if (tid !== '') {
       const t = this.templates.find((item: Template) => item.id === tid);
       if (t) {
@@ -102,6 +120,46 @@ struct Editor {
 
   aboutToDisappear(): void {
     this.stopAudio();
+  }
+
+  // ---- AI 模板拆解：优先视觉大模型，无 Key/失败回退模拟 ----
+  async runAiAnalyze(): Promise<void> {
+    if (AIService.hasDashscope()) {
+      try {
+        const demoImgs: string[] = ['demo1', 'demo2', 'demo3', 'demo4', 'demo5', 'demo6'];
+        const pick = demoImgs[Math.floor(Math.random() * demoImgs.length)];
+        const b64 = await AIService.resBase64(pick);
+        const prompt = '你是一个Plog排版设计师。分析这张图片的版式，提取其中的标题文字、副标题、标签、贴纸装饰、说明文案及其位置与颜色。' +
+          '只返回JSON：{"name":"模板名","desc":"一句话描述","elements":[{"type":"TEXT|STICKER|HASHTAG|CAPTION",' +
+          '"text":"具体内容","x":0到100,"y":0到100,"scale":1,"color":"#RRGGBB","fontSize":16-40}]}。' +
+          '不要把照片当元素。只输出JSON，不要其他文字。';
+        const content = await AIService.vision(b64, prompt);
+        const obj = JSON.parse(AIService.extractJson(content)) as AiTplResp;
+        const els: PlogElement[] = [];
+        for (const e of obj.elements) {
+          const t = e.text.trim();
+          if (t.length === 0) {
+            continue;
+          }
+          els.push(new PlogElement('ai' + els.length, e.type, t,
+            Math.min(96, Math.max(2, e.x)), Math.min(94, Math.max(2, e.y)),
+            Math.max(0.6, Math.min(2, e.scale)), e.color, e.fontSize, ''));
+        }
+        if (els.length === 0) {
+          throw new Error('empty elements');
+        }
+        this.bgImage = pick;
+        this.elements = els;
+        this.savedAt = '🤖 已用通义千问拆解模板：' + (obj.name || '');
+        return;
+      } catch (e) {
+        console.error('ai analyze real fail', JSON.stringify(e));
+      }
+    }
+    const t = aiAnalyzeTemplate();
+    this.bgImage = t.cover;
+    this.elements = t.elements.slice();
+    this.savedAt = '模板拆解（模拟）：' + t.name;
   }
 
   loadSample(): void {
@@ -262,18 +320,22 @@ struct Editor {
       return;
     }
     const mid = 'cut' + this.materials.length + '_' + new Date().getTime();
+    let aiCutted = false;
     if (el.type === 'PHOTO' || el.type === 'CUTOUT') {
-      if (el.text.startsWith('file://') && this.canvasW > 0 && this.canvasH > 0) {
-        // 真抠图：按元素所在区域裁剪原图（模拟抠图，真机接入分割模型后为透明底）
-        const ok = await this.cropToMaterial(mid, el);
-        if (ok) {
-          this.materials = this.materials.concat([new MaterialItem(mid, '抠图素材', 'CUTOUT', 'px:' + mid,
-            this.lastRegion)]);
+      aiCutted = await this.tryAICutout(mid, el);
+      if (!aiCutted) {
+        if (el.text.startsWith('file://') && this.canvasW > 0 && this.canvasH > 0) {
+          // 真抠图：按元素所在区域裁剪原图（无 Key 时的模拟抠图）
+          const ok = await this.cropToMaterial(mid, el);
+          if (ok) {
+            this.materials = this.materials.concat([new MaterialItem(mid, '抠图素材', 'CUTOUT', 'px:' + mid,
+              this.lastRegion)]);
+          } else {
+            this.materials = this.materials.concat([new MaterialItem(mid, '抠图素材', 'IMAGE', el.text, undefined)]);
+          }
         } else {
-          this.materials = this.materials.concat([new MaterialItem(mid, '抠图素材', 'IMAGE', el.text, undefined)]);
+          this.materials = this.materials.concat([new MaterialItem(mid, '图片素材', 'IMAGE', el.text, undefined)]);
         }
-      } else {
-        this.materials = this.materials.concat([new MaterialItem(mid, '图片素材', 'IMAGE', el.text, undefined)]);
       }
     } else if (el.type === 'STICKER') {
       this.materials = this.materials.concat([new MaterialItem(mid, '贴纸', 'STICKER', el.text, undefined)]);
@@ -281,7 +343,28 @@ struct Editor {
       this.materials = this.materials.concat([new MaterialItem(mid, '文字素材', 'TEXT', el.text, undefined)]);
     }
     this.showCutSheet = false;
-    this.savedAt = '已提取素材到素材库，点击素材可拖到画布上编辑';
+    if (!aiCutted) {
+      this.savedAt = '已提取素材到素材库，点击素材可拖到画布上编辑';
+    }
+  }
+
+  /** 百度人像分割真抠图：成功返回 true 且已加入素材库 */
+  async tryAICutout(mid: string, el: PlogElement): Promise<boolean> {
+    if (!AIService.hasBaidu() || el.text.startsWith('px:')) {
+      return false;
+    }
+    try {
+      const b64 = await AIService.base64Of(el.text);
+      const fg = await AIService.baiduCutout(b64);
+      const pm = await AIService.b64ToPixelMap(fg);
+      this.pixelMaps.set(mid, pm);
+      this.materials = this.materials.concat([new MaterialItem(mid, 'AI人像分割抠图', 'CUTOUT', 'px:' + mid, undefined)]);
+      this.savedAt = '🤖 已用百度人像分割抠出主体到素材库';
+      return true;
+    } catch (e) {
+      console.error('ai cutout fail', JSON.stringify(e));
+      return false;
+    }
   }
 
   private lastRegion: CropRegion | undefined = undefined;

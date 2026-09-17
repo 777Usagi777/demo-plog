@@ -1,12 +1,19 @@
 import { router } from '@kit.ArkUI';
 import { picker } from '@kit.CoreFileKit';
 import { getTemplates, Template } from '../model/Data';
+import { AIService } from '../model/LLM';
 
 @Entry
 @Component
 struct Index {
   @State templates: Template[] = getTemplates();
   @State picked: string[] = [];
+
+  aboutToAppear(): void {
+    AIService.init(getContext(this)).catch((e: Error) => {
+      console.error('AI init fail', JSON.stringify(e));
+    });
+  }
 
   build() {
     Column() {
@@ -49,6 +56,22 @@ struct Index {
             .fontColor(Color.White)
             .borderRadius(24)
             .onClick(() => this.pickPhotos())
+
+          // 模型接入
+          Row() {
+            Text('🤖 模型接入').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#1A1A1A')
+            Text('配置 API Key，启用真实 AI').fontSize(11).fontColor('#8A8A8A')
+            Blank()
+            Text('去配置 →').fontSize(13).fontColor('#3A7BFF')
+          }
+          .width('100%')
+          .height(52)
+          .padding({ left: 16, right: 16 })
+          .backgroundColor(Color.White)
+          .borderRadius(16)
+          .onClick(() => {
+            router.pushUrl({ url: 'pages/Settings' });
+          })
 
           // 模板库
           Row() {

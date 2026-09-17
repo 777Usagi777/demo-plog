@@ -2,6 +2,7 @@
   "src": [
     "pages/Index",
     "pages/Editor",
-    "pages/Camera"
+    "pages/Camera",
+    "pages/Settings"
   ]
 }

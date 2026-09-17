@@ -4,6 +4,21 @@ import {
   PhotoItem, CameraTip, PhotoAdvice, SkeletonPose,
   analyzePhotos, getCameraTips, getCategories, buildAdvice, buildSkeletons, getBones
 } from '../model/Data';
+import { AIService } from '../model/LLM';
+
+interface AiPhotoResp {
+  category: string;
+  isWaste: boolean;
+  hasPerson: boolean;
+  personCount: number;
+  desc: string;
+}
+
+interface AiAdviceResp {
+  angle: string;
+  subjectText: string;
+  photoText: string;
+}
 
 @Entry
 @Component
@@ -28,11 +43,20 @@ struct CameraPage {
   @State groupView: boolean = false; // 分组拖拽视图
   @State tips: CameraTip[] = getCameraTips();
   @State advice: PhotoAdvice[] = [];
+  @State analyzing: boolean = false;
+  @State analyzeProgress: string = '';
+  @State poseTick: number = 0;
   private adviceMap: Map<string, PhotoAdvice> = new Map<string, PhotoAdvice>();
   private skelCache: Map<string, Array<SkeletonPose>> = new Map<string, Array<SkeletonPose>>();
   private cellCtxs: Map<string, CanvasRenderingContext2D> = new Map<string, CanvasRenderingContext2D>();
   private cellAreas: Map<string, Area> = new Map<string, Area>();
   private subjectCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(new RenderingContextSettings(true));
+
+  aboutToAppear(): void {
+    AIService.init(getContext(this)).catch((e: Error) => {
+      console.error('AI init fail', JSON.stringify(e));
+    });
+  }
 
   uriOrRes(p: string): Resource | string {
     if (p.startsWith('file://') || p.startsWith('content://')) {
@@ -139,11 +163,103 @@ struct CameraPage {
   }
 
   async onAnalyze(): Promise<void> {
+    this.analyzing = true;
+    this.analyzeProgress = '';
     this.photos = analyzePhotos(this.photos);
     this.analyzed = true;
     this.adviceMap.clear();
     this.skelCache.clear();
     this.refreshAdvice();
+    if (AIService.hasDashscope()) {
+      await this.analyzeReal();
+      this.refreshAdvice();
+    }
+    if (AIService.hasDeepseek()) {
+      await this.refreshAdviceReal();
+    }
+    this.analyzing = false;
+    if (AIService.hasBaidu()) {
+      await this.prefetchPose();
+    }
+  }
+
+  /** 通义千问视觉：逐张真实分类/废片/人物检测 */
+  async analyzeReal(): Promise<void> {
+    const list = this.photos.slice();
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      this.analyzeProgress = '🤖 AI 分析 ' + (i + 1) + '/' + list.length + '：' + p.name;
+      try {
+        const src = p.uri.startsWith('file://') ? p.uri : (p.uri.length > 0 ? p.uri : p.name);
+        const b64 = await AIService.base64Of(src);
+        const prompt = '你是专业摄影选片助手。看这张照片，只返回JSON：' +
+          '{"category":"人物|景物|生日派对|文案|夜景|自拍|其他","isWaste":false,"hasPerson":true,"personCount":1,' +
+          '"desc":"一句话中文描述内容与画质"}。isWaste=true 表示全黑/严重模糊/严重过曝等废片。只输出JSON。';
+        const content = await AIService.vision(b64, prompt);
+        const obj = JSON.parse(AIService.extractJson(content)) as AiPhotoResp;
+        list[i] = new PhotoItem(p.uri, p.name, p.isResource, !!obj.isWaste,
+          obj.category, obj.desc, !!obj.hasPerson, Math.max(0, obj.personCount));
+      } catch (e) {
+        console.error('analyze one real fail', JSON.stringify(e));
+      }
+    }
+    this.photos = list;
+    this.analyzeProgress = '';
+  }
+
+  /** DeepSeek：真实拍摄建议覆盖模拟 */
+  async refreshAdviceReal(): Promise<void> {
+    const arr: PhotoAdvice[] = [];
+    for (const p of this.photos) {
+      if (p.isWaste) {
+        continue;
+      }
+      const key = p.uri + p.name;
+      try {
+        const sys = '你是专业摄影师，输出简明、可执行的拍摄建议。';
+        const user = '照片信息：分类=' + p.category + '，检测人数=' + p.personCount + '，描述=' + p.desc +
+          '。只返回JSON：{"angle":"平拍|仰拍|俯拍|45°侧拍","subjectText":"给被拍摄者的姿态建议(无人则空字符串)",' +
+          '"photoText":"给摄影师的机位/构图/参数建议"}。只输出JSON。';
+        const content = await AIService.chat(sys, user);
+        const obj = JSON.parse(AIService.extractJson(content)) as AiAdviceResp;
+        this.adviceMap.set(key, new PhotoAdvice(obj.angle, obj.subjectText, obj.photoText, p.hasPerson));
+      } catch (e) {
+        console.error('advice real fail', JSON.stringify(e));
+      }
+      arr.push(this.adviceMap.get(key)!);
+    }
+    this.advice = arr;
+  }
+
+  /** 百度真实姿态骨架预取，完成后触发重绘 */
+  async prefetchPose(): Promise<void> {
+    for (const p of this.photos) {
+      if (!p.hasPerson || p.isWaste) {
+        continue;
+      }
+      const skels = await AIService.realSkeletons(p);
+      if (skels.length > 0) {
+        this.skelCache.set(p.uri + p.name, skels);
+        this.poseTick++;
+      }
+    }
+    this.redrawSubject();
+  }
+
+  /** 被拍摄者大图区域：真实骨架就绪后重绘 */
+  redrawSubject(): void {
+    if (!this.poseMode) {
+      return;
+    }
+    const sp = this.subjectPhoto();
+    if (sp === undefined || !sp.hasPerson) {
+      return;
+    }
+    const skels = this.skelCache.get(sp.uri + sp.name);
+    if (skels === undefined || skels.length === 0) {
+      return;
+    }
+    this.drawPose(sp, this.subjectCtx, this.vp2px(180), this.vp2px(230));
   }
 
   async onAdd(): Promise<void> {
@@ -166,10 +282,12 @@ struct CameraPage {
   // ---- 姿态骨架 ----
   skeletonsOf(p: PhotoItem): Array<SkeletonPose> {
     const key = p.uri + p.name;
-    if (!this.skelCache.has(key)) {
-      const idx = this.photos.findIndex((x: PhotoItem) => x.uri === p.uri && x.name === p.name);
-      this.skelCache.set(key, buildSkeletons(Math.max(1, idx), p.personCount));
+    const real = this.skelCache.get(key);
+    if (real !== undefined) {
+      return real;
     }
+    const idx = this.photos.findIndex((x: PhotoItem) => x.uri === p.uri && x.name === p.name);
+    this.skelCache.set(key, buildSkeletons(Math.max(1, idx), p.personCount));
     return this.skelCache.get(key)!;
   }
 
@@ -444,6 +562,16 @@ struct CameraPage {
       .width('100%')
       .padding({ left: 16, right: 16, top: 4 })
 
+      if (this.analyzing) {
+        Row() {
+          LoadingProgress().width(18).height(18).color('#3A7BFF')
+          Text(this.analyzeProgress.length > 0 ? this.analyzeProgress : 'AI 分析中…')
+            .fontSize(12).fontColor('#3A7BFF').margin({ left: 8 })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 8 })
+      }
+
       if (this.groupView) {
         // ====== 分组拖拽视图 ======
         Row({ space: 8 }) {
@@ -557,7 +685,7 @@ struct CameraPage {
             Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.SpaceBetween }) {
               ForEach(this.filtered(), (p: PhotoItem) => {
                 this.photoCell(p)
-              }, (p: PhotoItem) => p.uri + p.name + p.isWaste + this.poseMode)
+              }, (p: PhotoItem) => p.uri + p.name + p.isWaste + this.poseMode + this.poseTick)
             }
             .width('100%')
             .margin({ top: 8 })
